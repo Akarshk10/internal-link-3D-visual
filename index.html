@@ -168,6 +168,12 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
+// Fallback if the primary CDN fails to load THREE
+if (typeof THREE === 'undefined') {
+  document.write('<script src="https://unpkg.com/three@0.128.0/build/three.min.js"><\/script>');
+}
+</script>
+<script>
 // ── CSV PARSER ────────────────────────────────────────────────────────────────
 function parseCSV(text) {
   const lines = text.split(/\r?\n/).filter(l => l.trim());
@@ -355,6 +361,11 @@ function nodeSize(n, p90) {
 
 // ── THREE.JS ──────────────────────────────────────────────────────────────────
 function initThree(maxIn, p90) {
+  if (typeof THREE === 'undefined') {
+    document.getElementById('viz-screen').insertAdjacentHTML('beforeend',
+      '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ef4444;font-size:14px;z-index:50">Three.js failed to load. Check network/CDN access.</div>');
+    return;
+  }
   if (renderer) { renderer.dispose(); document.getElementById('viz-screen').querySelector('canvas')?.remove(); }
 
   scene = new THREE.Scene();
@@ -426,25 +437,41 @@ function initThree(maxIn, p90) {
   function runForce() {
     const K_rep = 6000, K_spring = 0.018, K_center = 0.003, damp = 0.80;
     const N = allNodes.length;
+    // Repulsion + centering: scalar math, no per-pair object allocation
     for (let i = 0; i < N; i++) {
-      for (let j = i+1; j < N; j++) {
-        const d = positions[i].clone().sub(positions[j]);
-        const dist = Math.max(d.length(), 1);
-        const f = K_rep / (dist * dist);
-        d.normalize().multiplyScalar(f);
-        velocities[i].add(d); velocities[j].sub(d);
+      const pi = positions[i], vi = velocities[i];
+      const pix = pi.x, piy = pi.y, piz = pi.z;
+      let vix = vi.x, viy = vi.y, viz = vi.z;
+      for (let j = i + 1; j < N; j++) {
+        const pj = positions[j];
+        let dx = pix - pj.x, dy = piy - pj.y, dz = piz - pj.z;
+        let dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (dist < 1) dist = 1;
+        const f = K_rep / (dist * dist * dist); // 1/dist^2 force, /dist normalizes
+        dx *= f; dy *= f; dz *= f;
+        vix += dx; viy += dy; viz += dz;
+        const vj = velocities[j];
+        vj.x -= dx; vj.y -= dy; vj.z -= dz;
       }
-      velocities[i].add(positions[i].clone().negate().multiplyScalar(K_center));
+      vi.x = vix - pix * K_center;
+      vi.y = viy - piy * K_center;
+      vi.z = viz - piz * K_center;
     }
-    allLinks.forEach(l => {
-      const d = positions[l.t].clone().sub(positions[l.s]);
-      const f = d.multiplyScalar(K_spring);
-      velocities[l.s].add(f); velocities[l.t].sub(f);
-    });
+    // Link springs
+    for (let k = 0; k < allLinks.length; k++) {
+      const l = allLinks[k];
+      const ps = positions[l.s], pt = positions[l.t];
+      const fx = (pt.x - ps.x) * K_spring, fy = (pt.y - ps.y) * K_spring, fz = (pt.z - ps.z) * K_spring;
+      const vs = velocities[l.s], vt = velocities[l.t];
+      vs.x += fx; vs.y += fy; vs.z += fz;
+      vt.x -= fx; vt.y -= fy; vt.z -= fz;
+    }
     for (let i = 0; i < N; i++) {
-      velocities[i].multiplyScalar(damp);
-      positions[i].add(velocities[i]);
-      nodeMeshes[i].position.copy(positions[i]);
+      const v = velocities[i];
+      v.x *= damp; v.y *= damp; v.z *= damp;
+      const p = positions[i];
+      p.x += v.x; p.y += v.y; p.z += v.z;
+      nodeMeshes[i].position.copy(p);
     }
     // Update link geometry
     const lpa = lineMesh.geometry.attributes.position.array;
